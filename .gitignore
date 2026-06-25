@@ -26,3 +26,9 @@
 *.exe
 *.out
 *.app
+
+# Env file
+*.env
+
+# Build files
+app/build/*
