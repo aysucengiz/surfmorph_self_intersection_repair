@@ -329,50 +329,6 @@ void Animator::generateAnimationFrames(
     }
 }
 
-Animator::FramePose Animator::generateFramePoseIncr(
-    Mesh &mutablePose, const SurfaceMorph &surfaceMorph, Scalar t, int iFrame)
-{
-    using namespace Eigen;
-
-    Matrix<Scalar, 3, Dynamic> framePose = surfaceMorph.interpolatePoseAt(t);
-    for (auto vIt = mutablePose.vertices_begin();
-         vIt != mutablePose.vertices_end(); ++vIt)
-    {
-        auto vIdx = vIt->idx();
-        mutablePose.set_point(*vIt, Mesh::Point(framePose(0, vIdx),
-                                                framePose(1, vIdx),
-                                                framePose(2, vIdx)));
-    }
-
-    if (m_blrepair && meshHasIntersections(mutablePose))
-    {
-        qInfo("Frame %d: intersection detected, repairing...", iFrame);
-        repairFramePoseIfNeeded(mutablePose, iFrame);
-    }
-
-    mutablePose.update_normals();
-
-    auto numVertices = mutablePose.n_vertices();
-    std::vector<Scalar> coords;
-    coords.reserve(numVertices * 3);
-    std::vector<Scalar> normals;
-    normals.reserve(numVertices * 3);
-    for (auto vIt = mutablePose.vertices_begin();
-         vIt != mutablePose.vertices_end(); ++vIt)
-    {
-        auto p = mutablePose.point(*vIt);
-        auto n = mutablePose.normal(*vIt);
-        coords.push_back(p[0]);
-        coords.push_back(p[1]);
-        coords.push_back(p[2]);
-        normals.push_back(n[0]);
-        normals.push_back(n[1]);
-        normals.push_back(n[2]);
-    }
-
-    return {std::move(coords), std::move(normals)};
-}
-
 Animator::FramePose Animator::generateFramePose(
     Mesh &mutablePose, const SurfaceMorph &surfaceMorph, Scalar t, int iFrame)
 {

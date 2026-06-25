@@ -182,8 +182,6 @@ private:
     FramePose generateFramePose(Mesh &mutablePose,
                                 const SurfaceMorph &surfaceMorph, Scalar t,
                                 int iFrame);
-    FramePose generateFramePoseIncr(
-    Mesh &mutablePose, const SurfaceMorph &surfaceMorph, Scalar t, int iFrame);
     //! \brief Repair a generated frame pose with an external command if enabled.
     bool repairFramePoseIfNeeded(Mesh &mutablePose, int iFrame);
 
