@@ -2,11 +2,15 @@
 #include "animator.h"
 
 #include <Eigen/Dense>
+#include <QDir>
 #include <QFile>
 #include <QGLViewer/manipulatedCameraFrame.h>
 #include <QGLViewer/vec.h>
 #include <QKeyEvent>
-#include <QtGlobal>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QtGlobal> 
+#include <QThread>  
 
 #include <algorithm>
 #include <limits>
@@ -17,11 +21,24 @@
 
 const Animator::Vec3 Animator::MeshColor{Scalar(1), Scalar(1), Scalar(1)};
 
+namespace
+{
+QString shellQuote(const QString &text)
+{
+    QString quoted = text;
+    quoted.replace("'", "'\\''");
+    return "'" + quoted + "'";
+}
+
+}
+
 Animator::Animator(const QStringList &poseFiles, Animator::Scalar duration,
-                   Animator::Scalar fps)
+                   Animator::Scalar fps, bool repair, QString envpath)
 : QGLViewer()
+, m_repair{envpath.toStdString()}
 , m_fps{fps}
 , m_duration{duration}
+, m_blrepair{repair}
 , m_speed{0}
 , m_backwards{false}
 , m_framePoses()
@@ -292,31 +309,72 @@ void Animator::generateAnimationFrames(
     m_framePoses.resize(numFrames);
     auto t = Matrix<Scalar, Dynamic, 1>::LinSpaced(
         numFrames, Scalar(0), Scalar(surfaceMorph.numPoses() - 1));
+
     int processedFrames = 0;
     int tenPercents = -1;
-#pragma omp parallel
-    {
-        Mesh mutablePose{basePose};
-#pragma omp for
-        for (int iFrame = 0; iFrame < numFrames; iFrame++) {
-            m_framePoses[iFrame] =
-                generateFramePose(mutablePose, surfaceMorph, t[iFrame]);
-#pragma omp critical
-            {
-                processedFrames++;
-                int currentTen = (processedFrames * 10) / numFrames;
-                if (currentTen > tenPercents)
-                {
-                    tenPercents = currentTen;
-                    qInfo("Interpolating frames (%d%%)...", tenPercents * 10);
-                }
-            }
+    Mesh mutablePose{basePose};
+
+    for (int iFrame = 0; iFrame < numFrames; iFrame++) {
+
+        m_framePoses[iFrame] =
+            generateFramePose(mutablePose, surfaceMorph, t[iFrame], iFrame);
+
+        processedFrames++;
+        int currentTen = (processedFrames * 10) / numFrames;
+        if (currentTen > tenPercents)
+        {
+            tenPercents = currentTen;
+            qInfo("Interpolating frames (%d%%)...", tenPercents * 10);
         }
     }
 }
 
+Animator::FramePose Animator::generateFramePoseIncr(
+    Mesh &mutablePose, const SurfaceMorph &surfaceMorph, Scalar t, int iFrame)
+{
+    using namespace Eigen;
+
+    Matrix<Scalar, 3, Dynamic> framePose = surfaceMorph.interpolatePoseAt(t);
+    for (auto vIt = mutablePose.vertices_begin();
+         vIt != mutablePose.vertices_end(); ++vIt)
+    {
+        auto vIdx = vIt->idx();
+        mutablePose.set_point(*vIt, Mesh::Point(framePose(0, vIdx),
+                                                framePose(1, vIdx),
+                                                framePose(2, vIdx)));
+    }
+
+    if (m_blrepair && meshHasIntersections(mutablePose))
+    {
+        qInfo("Frame %d: intersection detected, repairing...", iFrame);
+        repairFramePoseIfNeeded(mutablePose, iFrame);
+    }
+
+    mutablePose.update_normals();
+
+    auto numVertices = mutablePose.n_vertices();
+    std::vector<Scalar> coords;
+    coords.reserve(numVertices * 3);
+    std::vector<Scalar> normals;
+    normals.reserve(numVertices * 3);
+    for (auto vIt = mutablePose.vertices_begin();
+         vIt != mutablePose.vertices_end(); ++vIt)
+    {
+        auto p = mutablePose.point(*vIt);
+        auto n = mutablePose.normal(*vIt);
+        coords.push_back(p[0]);
+        coords.push_back(p[1]);
+        coords.push_back(p[2]);
+        normals.push_back(n[0]);
+        normals.push_back(n[1]);
+        normals.push_back(n[2]);
+    }
+
+    return {std::move(coords), std::move(normals)};
+}
+
 Animator::FramePose Animator::generateFramePose(
-    Mesh &mutablePose, const SurfaceMorph &surfaceMorph, Scalar t)
+    Mesh &mutablePose, const SurfaceMorph &surfaceMorph, Scalar t, int iFrame)
 {
     using namespace Eigen;
 
@@ -332,6 +390,12 @@ Animator::FramePose Animator::generateFramePose(
                                                 framePose(1, vIdx),
                                                 framePose(2, vIdx)));
     }
+
+    if (m_blrepair && meshHasIntersections(mutablePose))
+    {
+        repairFramePoseIfNeeded(mutablePose, iFrame);
+    }
+
     mutablePose.update_normals();
 
     // Save frame
@@ -355,6 +419,84 @@ Animator::FramePose Animator::generateFramePose(
 
     return {std::move(coords), std::move(normals)};
 }
+#include <igl/copyleft/cgal/remesh_self_intersections.h>
+bool Animator::meshHasIntersections(const Mesh& mesh)
+{
+    using namespace Eigen;
+
+    MatrixXd V(mesh.n_vertices(), 3);
+    for (auto vIt = mesh.vertices_begin(); vIt != mesh.vertices_end(); ++vIt)
+    {
+        auto p = mesh.point(*vIt);
+        V(vIt->idx(), 0) = p[0];
+        V(vIt->idx(), 1) = p[1];
+        V(vIt->idx(), 2) = p[2];
+    }
+
+    MatrixXi F(mesh.n_faces(), 3);
+    for (auto fIt = mesh.faces_begin(); fIt != mesh.faces_end(); ++fIt)
+    {
+        int i = 0;
+        for (auto fvIt = mesh.cfv_iter(*fIt); fvIt.is_valid(); ++fvIt, ++i)
+            F(fIt->idx(), i) = fvIt->idx();
+    }
+
+    igl::copyleft::cgal::RemeshSelfIntersectionsParam params;
+    params.detect_only = true;  // don't actually remesh, just detect
+    params.first_only  = true;  // stop at first intersection, fast
+
+    MatrixXd VV;
+    MatrixXi FF, IF;
+    VectorXi J, IM;
+    igl::copyleft::cgal::remesh_self_intersections(V, F, params, VV, FF, IF, J, IM);
+
+    return IF.rows() > 0;
+}
+
+bool Animator::repairFramePoseIfNeeded(Mesh &mutablePose, int iFrame)
+{
+    std::cout
+    << "repairFramePoseIfNeeded thread: "
+    << QThread::currentThreadId()
+    << std::endl;
+    // Write current interpolated frame to a temp .obj
+    QString workDirPath = QDir::temp().filePath("surfmorph_repair_frames");
+    QDir workDir;
+    if (!workDir.mkpath(workDirPath))
+        throw std::runtime_error("Could not create repair work directory.");
+
+    const QString frameName = QString("frame_%1").arg(iFrame, 5, 10, QChar('0'));
+    const QString inputPath = QDir(workDirPath).filePath(frameName + ".obj");
+
+    writeMesh(mutablePose, inputPath);
+
+    // Call your repair function
+    std::string repairedPath = m_repair.repairMesh(inputPath.toStdString());
+
+    if (repairedPath == inputPath.toStdString())
+    {
+        // repairMesh returned the original — repair failed or wasn't needed
+        return false;
+    }
+
+    auto repairedMesh = readMesh(QString::fromStdString(repairedPath));
+    if (!sameTriangleStructure(mutablePose, *repairedMesh))
+    {
+        throw std::runtime_error(
+            "Repaired frame changed mesh topology; animation requires the "
+            "same vertices and triangles.");
+    }
+
+    auto repairedVertexIt = repairedMesh->vertices_begin();
+    for (auto vertexIt = mutablePose.vertices_begin();
+         vertexIt != mutablePose.vertices_end();
+         ++vertexIt, ++repairedVertexIt)
+    {
+        mutablePose.set_point(*vertexIt, repairedMesh->point(*repairedVertexIt));
+    }
+
+    return true;
+}
 
 std::shared_ptr<Animator::Mesh> Animator::readMesh(const QString &meshFile)
 {
@@ -372,6 +514,46 @@ std::shared_ptr<Animator::Mesh> Animator::readMesh(const QString &meshFile)
         newMesh->update_normals();
     }
     return newMesh;
+}
+
+void Animator::writeMesh(const Mesh &mesh, const QString &meshFile)
+{
+    OpenMesh::IO::Options wopt;
+    if (!OpenMesh::IO::write_mesh(mesh, meshFile.toStdString(), wopt))
+    {
+        throw std::runtime_error("Could not write mesh file.");
+    }
+}
+
+bool Animator::sameTriangleStructure(const Mesh &lhs, const Mesh &rhs)
+{
+    if (lhs.n_vertices() != rhs.n_vertices() || lhs.n_faces() != rhs.n_faces())
+    {
+        return false;
+    }
+
+    auto lhsFaceIt = lhs.faces_begin();
+    auto rhsFaceIt = rhs.faces_begin();
+    for (; lhsFaceIt != lhs.faces_end() && rhsFaceIt != rhs.faces_end();
+         ++lhsFaceIt, ++rhsFaceIt)
+    {
+        auto lhsVertexIt = lhs.cfv_iter(*lhsFaceIt);
+        auto rhsVertexIt = rhs.cfv_iter(*rhsFaceIt);
+        for (; lhsVertexIt.is_valid() && rhsVertexIt.is_valid();
+             ++lhsVertexIt, ++rhsVertexIt)
+        {
+            if (lhsVertexIt->idx() != rhsVertexIt->idx())
+            {
+                return false;
+            }
+        }
+        if (lhsVertexIt.is_valid() || rhsVertexIt.is_valid())
+        {
+            return false;
+        }
+    }
+
+    return lhsFaceIt == lhs.faces_end() && rhsFaceIt == rhs.faces_end();
 }
 
 void Animator::setFrame(unsigned int iFrame)

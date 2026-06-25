@@ -29,7 +29,7 @@
 //!
 //! \return Poses file paths, animation duration and frame rate
 //!
-std::tuple<QStringList, float, float>
+std::tuple<QStringList, float, float, bool, QString>
 processArgs(const QApplication &app);
 
 int main(int argc, char **argv)
@@ -41,15 +41,17 @@ int main(int argc, char **argv)
     QStringList files;
     float duration;
     float fps;
-    std::tie(files, duration, fps) = processArgs(app);
+    bool repair;
+    QString envpath;
+    std::tie(files, duration, fps, repair, envpath) = processArgs(app);
 
-    Animator animator(files, duration, fps);
+    Animator animator(files, duration, fps, repair, envpath);
     animator.show();
 
     return app.exec();
 }
 
-std::tuple<QStringList, float, float>
+std::tuple<QStringList, float, float, bool, QString>
 processArgs(const QApplication &app)
 {
     QCommandLineParser parser;
@@ -60,10 +62,10 @@ processArgs(const QApplication &app)
                                  "<pose files...>");
 
     parser.addOptions({
-        {{"d", "duration"},
-         "Duration of the animation (default: number of poses minus one).",
-         "seconds"},
+        {{"d", "duration"}, "Duration of the animation (default: number of poses minus one).", "seconds"},
         {{"f", "fps"}, "Frames per second (default: 25).", "fps", "25"},
+        {{"r", "repair"}, "Enable mesh repair on each interpolated frame."},
+        {{"e", "env"}, "Location of the env file."},
     });
 
     parser.addHelpOption();
@@ -93,6 +95,18 @@ processArgs(const QApplication &app)
     {
         parser.showHelp(1);
     }
+    // at the end of processArgs:
+    bool repair = parser.isSet("repair");
 
-    return std::make_tuple(files, duration, fps);
+    QString envPath;
+    if (parser.isSet("env"))
+    {
+        envPath = parser.value("env");
+    }
+    else
+    {
+        envPath = QCoreApplication::applicationDirPath() + "/../.env";
+    }
+
+    return std::make_tuple(files, duration, fps, repair, envPath);
 }

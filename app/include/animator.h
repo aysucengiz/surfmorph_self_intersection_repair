@@ -4,7 +4,7 @@
 
 #include <OpenMesh/Core/IO/MeshIO.hh> // Before any mesh type
 #include <OpenMesh/Core/Mesh/TriMesh_ArrayKernelT.hh>
-#include <QGLShaderProgram>
+#include <QOpenGLShaderProgram>
 #include <QGLViewer/qglviewer.h>
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions>
@@ -13,6 +13,7 @@
 #include <QString>
 #include <QStringList>
 #include <surfmorph/surfmorph.h>
+#include "fixIntersection.h"
 
 #include <array>
 #include <memory>
@@ -41,7 +42,7 @@ public:
     //! \param duration Animation duration in seconds
     //! \param fps Animation frame rate in frames per second
     //!
-    Animator(const QStringList &poseFiles, Scalar duration, Scalar fps);
+    Animator(const QStringList &poseFiles, Scalar duration, Scalar fps, bool repair, QString envpath);
 
     //!
     //! \brief Destructor.
@@ -61,13 +62,14 @@ protected:
 private:
     //! Surface morpher
     typedef surfmorph::SurfaceMorph<Scalar> SurfaceMorph;
-
     //! \brief Information of a pose at a frame.
     struct FramePose
     {
         std::vector<Scalar> coords;
         std::vector<Scalar> normals;
     };
+
+    Repair m_repair;
 
     //!
     //! Custom mesh traits
@@ -97,6 +99,8 @@ private:
     const Scalar m_fps;
     //! Animation duration
     const Scalar m_duration;
+    // ! Repair option
+    const bool m_blrepair;
     //! Animation play speed
     int m_speed;
     //! Whether to play the animation backwards on each loop
@@ -109,6 +113,7 @@ private:
     Idx m_numVertices;
     //! Current animation frame
     unsigned int m_currentFrame;
+    
 
     //! OpenGL VAO
     QOpenGLVertexArrayObject m_vao;
@@ -175,7 +180,18 @@ private:
     //! \return A new frame pose for the given time point
     //!
     FramePose generateFramePose(Mesh &mutablePose,
-                                const SurfaceMorph &surfaceMorph, Scalar t);
+                                const SurfaceMorph &surfaceMorph, Scalar t,
+                                int iFrame);
+    FramePose generateFramePoseIncr(
+    Mesh &mutablePose, const SurfaceMorph &surfaceMorph, Scalar t, int iFrame);
+    //! \brief Repair a generated frame pose with an external command if enabled.
+    bool repairFramePoseIfNeeded(Mesh &mutablePose, int iFrame);
+
+    //! \brief Write a mesh to disk.
+    static void writeMesh(const Mesh &mesh, const QString &meshFile);
+
+    //! \brief Check whether two meshes have the same animation topology.
+    static bool sameTriangleStructure(const Mesh &lhs, const Mesh &rhs);
 
     //!
     //! \brief Load OpenGL shaders.
@@ -218,6 +234,9 @@ private:
     //! \brief Set the animation perio according to the current speed.
     //!
     void updateAnimationPeriod();
+
+    
+    bool meshHasIntersections(const Mesh& mesh);
 };
 
 #endif
